@@ -2,29 +2,33 @@
  * singleton-utils.ts
  * 
  * Utilitários para manipulação de singletons em formato YAML.
- * Agora organizados por tema: src/content/singletons/{themeId}/{name}.yaml
+ * Agora estruturado para ser compatível com Edge Runtimes (Cloudflare Pages),
+ * utilizando `import.meta.glob` em vez de `fs`.
  */
 
 import yaml from 'js-yaml';
-import path from 'node:path';
-import fs from 'node:fs/promises';
 
-const SINGLETONS_BASE_DIR = path.resolve('./src/content/singletons');
+// Carrega todos os singletons globais no build
+const allSingletons = import.meta.glob('/src/content/singletons/**/*.yaml', {
+    eager: true,
+    query: '?raw',
+    import: 'default'
+}) as Record<string, string>;
 
 /**
  * Obtém o tema ativo
  */
 async function getActiveThemeId(): Promise<string> {
     try {
-        // Tentar ler do arquivo settings.yaml diretamente
-        const settingsPath = path.join(SINGLETONS_BASE_DIR, 'settings.yaml');
-        const content = await fs.readFile(settingsPath, 'utf-8');
-        const data = yaml.load(content) as any;
-        return data?.activeTheme || 'classic';
+        const settingsRaw = allSingletons['/src/content/singletons/settings.yaml'];
+        if (settingsRaw) {
+            const data = yaml.load(settingsRaw) as any;
+            return data?.activeTheme || 'classic';
+        }
     } catch (error) {
-        // Se não conseguir ler, retorna classic como padrão
-        return 'classic';
+        // Ignorar erro e usar default
     }
+    return 'classic';
 }
 
 /**
@@ -33,30 +37,19 @@ async function getActiveThemeId(): Promise<string> {
 export async function readSingleton(name: string, themeId?: string): Promise<any> {
     try {
         const activeTheme = themeId || await getActiveThemeId();
-        const themeDir = path.join(SINGLETONS_BASE_DIR, activeTheme);
-        const filePath = path.join(themeDir, `${name}.yaml`);
-        
-        // Criar diretório se não existir
-        await fs.mkdir(themeDir, { recursive: true });
-        
-        try {
-            const content = await fs.readFile(filePath, 'utf-8');
-            const data = yaml.load(content);
-            return data;
-        } catch (fileError: any) {
-            // Se arquivo não existe, tentar ler do diretório antigo (migração)
-            const oldPath = path.join(SINGLETONS_BASE_DIR, `${name}.yaml`);
-            try {
-                const oldContent = await fs.readFile(oldPath, 'utf-8');
-                const oldData = yaml.load(oldContent);
-                // Migrar automaticamente
-                await writeSingleton(name, oldData, activeTheme);
-                return oldData;
-            } catch {
-                // Arquivo não existe, retornar null
-                return null;
-            }
+
+        let rawContent = allSingletons[`/src/content/singletons/${activeTheme}/${name}.yaml`];
+
+        if (!rawContent) {
+            // Se arquivo não existe, tentar ler do diretório antigo (retrocompatibilidade)
+            rawContent = allSingletons[`/src/content/singletons/${name}.yaml`];
         }
+
+        if (rawContent) {
+            return yaml.load(rawContent);
+        }
+
+        return null;
     } catch (error) {
         console.error(`❌ Erro ao ler singleton ${name}:`, error);
         return null;
@@ -65,33 +58,15 @@ export async function readSingleton(name: string, themeId?: string): Promise<any
 
 /**
  * Escreve um singleton (cria ou atualiza) no tema ativo
+ * AVISO: Em produção (Edge), não é possível escrever no filesystem.
+ * Isso só funcionará com uma API/CMS adequado para a Cloudflare, como o Keystatic no modo GitHub.
  */
 export async function writeSingleton(name: string, data: any, themeId?: string): Promise<boolean> {
-    try {
-        const activeTheme = themeId || await getActiveThemeId();
-        const themeDir = path.join(SINGLETONS_BASE_DIR, activeTheme);
-        const filePath = path.join(themeDir, `${name}.yaml`);
-        
-        // Criar diretório se não existir
-        await fs.mkdir(themeDir, { recursive: true });
-        
-        // Limpar valores undefined
-        const cleanedData = Object.fromEntries(
-            Object.entries(data).filter(([, value]) => value !== undefined)
-        );
-        
-        const yamlContent = yaml.dump(cleanedData, {
-            lineWidth: -1,
-            noRefs: true,
-            quotingType: '"',
-        });
-        
-        await fs.writeFile(filePath, yamlContent, 'utf-8');
-        return true;
-    } catch (error) {
-        console.error(`❌ Erro ao escrever singleton ${name}:`, error);
-        return false;
-    }
+    // Cloudflare Pages não suporta fs no runtime Edge. 
+    // Para edição em produção o Keystatic já lida com o GitHub Actions/API.
+    // O utils de write era usado localmente/dev-only ou em ambientes node puros.
+    console.warn('writeSingleton: Gravação local de YAML desabilitada no Edge runtime. Use o painel Keystone/GitHub.');
+    return false;
 }
 
 /**
@@ -100,17 +75,11 @@ export async function writeSingleton(name: string, data: any, themeId?: string):
 export async function listSingletons(themeId?: string): Promise<string[]> {
     try {
         const activeTheme = themeId || await getActiveThemeId();
-        const themeDir = path.join(SINGLETONS_BASE_DIR, activeTheme);
-        
-        // Criar diretório se não existir
-        await fs.mkdir(themeDir, { recursive: true });
-        
-        const files = await fs.readdir(themeDir);
-        const yamlFiles = files
-            .filter(f => f.endsWith('.yaml') && f !== 'settings.yaml')
-            .map(f => f.replace('.yaml', ''));
-        
-        return yamlFiles;
+        const prefix = `/src/content/singletons/${activeTheme}/`;
+
+        return Object.keys(allSingletons)
+            .filter(key => key.startsWith(prefix) && key.endsWith('.yaml'))
+            .map(key => key.replace(prefix, '').replace('.yaml', ''));
     } catch (error) {
         console.error('❌ Erro ao listar singletons:', error);
         return [];
